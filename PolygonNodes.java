@@ -88,7 +88,7 @@ public class PolygonNodes extends NodeRenderer {
                 catch (Exception e) {}
             }
             if (renderAsNgon != -1) {
-                renderSquaresProcessing(item, (ProcessingTarget) target, properties, renderAsNgon);
+                renderProcessing(item, (ProcessingTarget) target, properties, renderAsNgon);
             } else {
                 super.render(item, target, properties);
             }
@@ -101,7 +101,7 @@ public class PolygonNodes extends NodeRenderer {
         }
     }
 
-    public void renderSquaresProcessing(Item item, ProcessingTarget target, PreviewProperties properties, int numSides) {
+    public void renderProcessing(Item item, ProcessingTarget target, PreviewProperties properties, int numSides) {
         //Params
         Float x = item.getData(NodeItem.X);
         Float y = item.getData(NodeItem.Y);
@@ -129,8 +129,14 @@ public class PolygonNodes extends NodeRenderer {
         graphics.beginShape();
         for (int i = 0; i < numSides; i++){
             double angle = 2 * Math.PI / numSides;
-            float calcX = (float)(x + (size * .6) * Math.cos(i * angle));
-            float calcY = (float)(y - (size * .6) * Math.sin(i * angle));
+            float calcX, calcY;
+            if (numSides % 2 == 0) {
+                calcX = (float)(x + (size * .6) * Math.cos(i * angle - Math.PI/4));
+                calcY = (float)(y - (size * .6) * Math.sin(i * angle - Math.PI/4));
+            } else {
+                calcX = (float)(x + (size * .6) * Math.cos(i * angle));
+                calcY = (float)(y - (size * .6) * Math.sin(i * angle));
+            }
             graphics.vertex(calcX, calcY);
         }
         graphics.endShape(PGraphics.CLOSE);
@@ -169,5 +175,6 @@ public class PolygonNodes extends NodeRenderer {
     
     @Override
     public void preProcess(PreviewModel previewModel) {
+        //Not implemented
     }
 }
