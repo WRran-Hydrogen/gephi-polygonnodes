@@ -36,6 +36,7 @@ Version 3 license, then the option applies only if the new code is
 made subject to such option by the copyright holder.
 
 Contributor(s):
+zde <zde6919@rit.edu>
 
 Portions Copyrighted 2011 Gephi Consortium.
  */
