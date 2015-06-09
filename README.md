@@ -1,4 +1,6 @@
 <h1>Polygon shaped nodes</h1>
+<a>https://marketplace.gephi.org/plugin/polygon-nodes/ </a>
+
 <h2>Description</h2>
 <ul>
 <li>Extends default node renderer to support polygon shaped nodes with arbitrary number of sides. Add a column of Integers in the data table named "Polygon", the value corresponds to the number of sides. The renderer must be enabled in the "Manage Renderers" tab.
