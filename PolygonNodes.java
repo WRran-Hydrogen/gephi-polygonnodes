@@ -1,3 +1,5 @@
+package org.gephi.plugins.gephinodes;
+
 /*
 Copyright 2008-2011 Gephi
 Authors : Eduardo Ramos <eduramiba@gmail.com>
@@ -40,15 +42,15 @@ zde <zde6919@rit.edu>
 yao <xy3717@foxmail.com>
  */
 
-// SPDX-License-Identifier: GPL-2.0-or-later
-// Polygon-shaped & multiple-shape node renderer for Gephi 0.10.x (JDK 17)
 
 import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.Stroke;
 import java.awt.geom.Path2D;
+import java.awt.geom.PathIterator;
 import java.util.Locale;
+
 
 import org.gephi.graph.api.Node;
 import org.gephi.preview.api.G2DTarget;
@@ -58,163 +60,115 @@ import org.gephi.preview.api.PreviewModel;
 import org.gephi.preview.api.PreviewProperties;
 import org.gephi.preview.api.PreviewProperty;
 import org.gephi.preview.api.RenderTarget;
-import org.gephi.preview.spi.Renderer;
 import org.gephi.preview.api.SVGTarget;
 import org.gephi.preview.plugin.items.NodeItem;
 import org.gephi.preview.plugin.renderers.NodeRenderer;
+import org.gephi.preview.spi.Renderer;
 import org.gephi.preview.types.DependantColor;
 import org.openide.util.NbBundle;
 import org.openide.util.lookup.ServiceProvider;
+import org.openide.util.NbBundle.Messages;
 
-@ServiceProvider(service = Renderer.class)
+@ServiceProvider(service = Renderer.class, position = 10)
+@Messages({
+    "PolygonNodes.name=Polygon & Multiple Shapes (replaces Nodes)",
+    "ShapeNodes.property.enable=Enable multiple shapes",
+    "ShapeNodes.property.shapeColumn=Shape column name",
+    "ShapeNodes.property.polygonColumn=Polygon-sides column name",
+    "ShapeNodes.property.defaultShape=Default shape",
+    "ShapeNodes.property.starPoints=Star points"
+})
 public class PolygonNodes extends NodeRenderer {
 
-    // ======== Property keys (appear in Preview -> Settings) ========
-    private static final String PROP_ENABLE = "ShapeNodes.property.enable";
-    private static final String PROP_SHAPE_COLUMN = "ShapeNodes.property.shapeColumn";
-    private static final String PROP_POLYGON_COLUMN = "ShapeNodes.property.polygonColumn";
+    private static final String PROP_ENABLE        = "ShapeNodes.property.enable";
+    private static final String PROP_SHAPE_COLUMN  = "ShapeNodes.property.shapeColumn";
+    private static final String PROP_POLY_COLUMN   = "ShapeNodes.property.polygonColumn";
     private static final String PROP_DEFAULT_SHAPE = "ShapeNodes.property.defaultShape";
-    private static final String PROP_STAR_POINTS = "ShapeNodes.property.starPoints";
+    private static final String PROP_STAR_POINTS   = "ShapeNodes.property.starPoints";
 
-    // ======== Supported shapes ========
     private enum ShapeKind {
-        CIRCLE, TRIANGLE, SQUARE, DIAMOND, POLYGON, PENTAGON, HEXAGON, HEPTAGON, OCTAGON, STAR
+        CIRCLE, TRIANGLE, SQUARE, DIAMOND,
+        POLYGON, PENTAGON, HEXAGON, HEPTAGON, OCTAGON, STAR
     }
+
 
     @Override
     public String getDisplayName() {
-        // 将在 Manage Renderers 中显示的名称
-        return NbBundle.getMessage(PolygonNodes.class, "PolygonNodes.name", "Polygon shaped nodes");
+        return Bundle.PolygonNodes_name();
     }
 
+
     @Override
-    public boolean isRendererForitem(Item item, PreviewProperties properties) {
-        // 只处理节点项目，并受启用开关控制
-        Boolean enabled = properties.getValue(PROP_ENABLE);
+    public boolean isRendererForitem(Item item, PreviewProperties props) {
+        Boolean enabled = props.getValue(PROP_ENABLE);
         boolean enabledValue = enabled != null ? enabled : true;
         return enabledValue && Item.NODE.equals(item.getType());
     }
 
-    @Override
-    public void preProcess(PreviewModel previewModel) {
-        // 这里不需要额外预处理；如需复杂逻辑，可在此填充 item 的缓存数据
-        super.preProcess(previewModel);
-    }
+    @Override public void preProcess(PreviewModel previewModel) { super.preProcess(previewModel); }
 
     @Override
     public void render(Item item, RenderTarget target, PreviewProperties props) {
-        // 读取当前节点的形状配置
         Node node = (item.getSource() instanceof Node) ? (Node) item.getSource() : null;
         ResolvedShape rs = resolveShape(node, props);
 
-        // 未能解析出自定义形状 -> 走默认节点渲染（圆）
         if (rs == null || rs.kind == ShapeKind.CIRCLE) {
             super.render(item, target, props);
             return;
         }
-
         if (target instanceof G2DTarget) {
             renderG2D(item, (G2DTarget) target, props, rs);
         } else if (target instanceof SVGTarget) {
-            // 简单回退：对 SVG/PDF 仍然交给父类，保持兼容
-            super.render(item, target, props);
+            renderSVG(item, (SVGTarget) target, props, rs);
         } else if (target instanceof PDFTarget) {
+            // 先回退，等 B 步增加 PDF 支持
             super.render(item, target, props);
         } else {
-            // 未知目标，安全回退
             super.render(item, target, props);
         }
     }
 
     @Override
     public PreviewProperty[] getProperties() {
-        // 在 Preview -> Settings 面板暴露可调属性
-        return new PreviewProperty[] {
-            PreviewProperty.createProperty(
-                this, PROP_ENABLE, Boolean.class,
+        PreviewProperty[] base = super.getProperties();
+        PreviewProperty[] extra = new PreviewProperty[] {
+            PreviewProperty.createProperty(this, PROP_ENABLE, Boolean.class,
                 "Enable multiple shapes", PreviewProperty.CATEGORY_NODES,
-                "Enable node shape mapping by attribute"
-            ).setValue(Boolean.TRUE),
-            PreviewProperty.createProperty(
-                this, PROP_SHAPE_COLUMN, String.class,
+                "Enable node shape mapping by attribute").setValue(Boolean.TRUE),
+            PreviewProperty.createProperty(this, PROP_SHAPE_COLUMN, String.class,
                 "Shape column name", PreviewProperty.CATEGORY_NODES,
-                "Node string column holding shape (e.g. shape). Values: circle, triangle, square, diamond, polygon, pentagon, hexagon, heptagon, octagon, star"
-            ).setValue("shape"),
-            PreviewProperty.createProperty(
-                this, PROP_POLYGON_COLUMN, String.class,
+                "String column: circle/triangle/square/diamond/polygon/pentagon/hexagon/heptagon/octagon/star")
+                .setValue("shape"),
+            PreviewProperty.createProperty(this, PROP_POLY_COLUMN, String.class,
                 "Polygon-sides column name", PreviewProperty.CATEGORY_NODES,
-                "Node integer column holding the polygon number of sides (>=3). Used when shape is polygon/unspecified."
-            ).setValue("polygon"),
-            PreviewProperty.createProperty(
-                this, PROP_DEFAULT_SHAPE, String.class,
+                "Integer column for polygon sides (>=3)").setValue("polygon"),
+            PreviewProperty.createProperty(this, PROP_DEFAULT_SHAPE, String.class,
                 "Default shape", PreviewProperty.CATEGORY_NODES,
-                "Fallback shape name when no valid attribute is set (circle/triangle/square/diamond/polygon/pentagon/hexagon/heptagon/octagon/star)."
-            ).setValue("circle"),
-            PreviewProperty.createProperty(
-                this, PROP_STAR_POINTS, Integer.class,
+                "Fallback when no valid attribute").setValue("circle"),
+            PreviewProperty.createProperty(this, PROP_STAR_POINTS, Integer.class,
                 "Star points", PreviewProperty.CATEGORY_NODES,
-                "Number of points for star shape (>=3)."
-            ).setValue(Integer.valueOf(5))
+                "Number of points for star (>=3)").setValue(Integer.valueOf(5))
         };
+        PreviewProperty[] merged = new PreviewProperty[base.length + extra.length];
+        System.arraycopy(base, 0, merged, 0, base.length);
+        System.arraycopy(extra, 0, merged, base.length, extra.length);
+        return merged;
     }
 
-    // ======================== Rendering (G2D) ========================
-
+    // ---------- G2D ----------
     private void renderG2D(Item item, G2DTarget target, PreviewProperties props, ResolvedShape rs) {
-        // 基本几何与样式
         Float x = item.getData(NodeItem.X);
         Float y = item.getData(NodeItem.Y);
-        Float size = item.getData(NodeItem.SIZE); // 预览里大小单位（与默认节点渲染一致）
+        Float size = item.getData(NodeItem.SIZE);
         Color fill = item.getData(NodeItem.COLOR);
-
         Color border = ((DependantColor) props.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(fill);
         float borderWidth = props.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
 
+        Path2D.Float path = buildPath(x, y, size, rs);
+
         Graphics2D g2 = target.getGraphics();
-        Path2D.Float path;
-        switch (rs.kind) {
-            case TRIANGLE:
-                path = regularPolygonPath(x, y, size, 3, -Math.PI / 2);
-                break;
-            case SQUARE:
-                path = regularPolygonPath(x, y, size, 4, Math.PI / 4); // 旋转成菱形方向的正方形用于对齐视觉
-                break;
-            case DIAMOND:
-                path = diamondPath(x, y, size);
-                break;
-            case PENTAGON:
-                path = regularPolygonPath(x, y, size, 5, -Math.PI / 2);
-                break;
-            case HEXAGON:
-                path = regularPolygonPath(x, y, size, 6, -Math.PI / 2);
-                break;
-            case HEPTAGON:
-                path = regularPolygonPath(x, y, size, 7, -Math.PI / 2);
-                break;
-            case OCTAGON:
-                path = regularPolygonPath(x, y, size, 8, -Math.PI / 2);
-                break;
-            case POLYGON:
-                path = regularPolygonPath(x, y, size, Math.max(3, rs.sides), -Math.PI / 2);
-                break;
-            case STAR:
-                path = starPath(x, y, size, Math.max(3, rs.starPoints));
-                break;
-            case CIRCLE:
-            default:
-                path = null; // 已在上层回退
-                break;
-        }
-
-        if (path == null) {
-            super.render(item, target, props);
-            return;
-        }
-
-        // 先填充，再描边（与默认节点样式保持一致的边界表现）
         g2.setColor(fill);
         g2.fill(path);
-
         if (borderWidth > 0f) {
             Stroke old = g2.getStroke();
             g2.setStroke(new BasicStroke(borderWidth, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER));
@@ -224,32 +178,74 @@ public class PolygonNodes extends NodeRenderer {
         }
     }
 
-    private Path2D.Float regularPolygonPath(float cx, float cy, float radius, int n, double phase) {
-        Path2D.Float poly = new Path2D.Float();
+    // ---------- SVG ----------
+    private void renderSVG(Item item, SVGTarget target, PreviewProperties props, ResolvedShape rs) {
+        Float x = item.getData(NodeItem.X);
+        Float y = item.getData(NodeItem.Y);
+        Float size = item.getData(NodeItem.SIZE);
+        Color fill = item.getData(NodeItem.COLOR);
+        Color border = ((DependantColor) props.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(fill);
+        float borderWidth = props.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
+
+        Path2D.Float path = buildPath(x, y, size, rs);
+        String d = toSvgPath(path);
+
+        org.w3c.dom.Document doc = target.getDocument();     // 0.10.x 通常提供 Batik DOM
+        org.w3c.dom.Element root = doc.getDocumentElement(); // 或 target.getTopElement()
+        String svgNS = root.getNamespaceURI() != null ? root.getNamespaceURI() : "http://www.w3.org/2000/svg";
+
+        org.w3c.dom.Element pathEl = doc.createElementNS(svgNS, "path");
+        pathEl.setAttribute("d", d);
+        pathEl.setAttribute("fill", rgb(fill));
+        if (borderWidth > 0f) {
+            pathEl.setAttribute("stroke", rgb(border));
+            pathEl.setAttribute("stroke-width", Float.toString(borderWidth));
+        } else {
+            pathEl.setAttribute("stroke", "none");
+        }
+        root.appendChild(pathEl);
+    }
+
+    // ---------- Path builders ----------
+    private Path2D.Float buildPath(float cx, float cy, float r, ResolvedShape rs) {
+        switch (rs.kind) {
+            case TRIANGLE:  return regularPolygonPath(cx, cy, r, 3, -Math.PI / 2);
+            case SQUARE:    return regularPolygonPath(cx, cy, r, 4,  Math.PI / 4);
+            case DIAMOND:   return diamondPath(cx, cy, r);
+            case PENTAGON:  return regularPolygonPath(cx, cy, r, 5, -Math.PI / 2);
+            case HEXAGON:   return regularPolygonPath(cx, cy, r, 6, -Math.PI / 2);
+            case HEPTAGON:  return regularPolygonPath(cx, cy, r, 7, -Math.PI / 2);
+            case OCTAGON:   return regularPolygonPath(cx, cy, r, 8, -Math.PI / 2);
+            case POLYGON:   return regularPolygonPath(cx, cy, r, Math.max(3, rs.sides), -Math.PI / 2);
+            case STAR:      return starPath(cx, cy, r, Math.max(3, rs.starPoints));
+            default:        return null;
+        }
+    }
+
+    private Path2D.Float regularPolygonPath(float cx, float cy, float r, int n, double phase) {
+        Path2D.Float p = new Path2D.Float();
         for (int i = 0; i < n; i++) {
             double a = 2 * Math.PI * i / n + phase;
-            double px = cx + radius * Math.cos(a);
-            double py = cy + radius * Math.sin(a);
-            if (i == 0) poly.moveTo(px, py); else poly.lineTo(px, py);
+            double px = cx + r * Math.cos(a);
+            double py = cy + r * Math.sin(a);
+            if (i == 0) p.moveTo(px, py); else p.lineTo(px, py);
         }
-        poly.closePath();
-        return poly;
+        p.closePath();
+        return p;
     }
 
     private Path2D.Float diamondPath(float cx, float cy, float r) {
         Path2D.Float p = new Path2D.Float();
-        p.moveTo(cx, cy - r);
+        p.moveTo(cx,     cy - r);
         p.lineTo(cx + r, cy);
-        p.lineTo(cx, cy + r);
+        p.lineTo(cx,     cy + r);
         p.lineTo(cx - r, cy);
         p.closePath();
         return p;
     }
 
     private Path2D.Float starPath(float cx, float cy, float r, int points) {
-        // “星形”= 外半径 r，内半径 r/2（可根据需要改为属性）
-        double rOuter = r;
-        double rInner = r * 0.5;
+        double rOuter = r, rInner = r * 0.5;
         int n = Math.max(3, points);
         Path2D.Float p = new Path2D.Float();
         for (int i = 0; i < n * 2; i++) {
@@ -263,96 +259,74 @@ public class PolygonNodes extends NodeRenderer {
         return p;
     }
 
-    // ======================== Shape resolution ========================
-
+    // ---------- Shape resolution ----------
     private static final class ResolvedShape {
-        final ShapeKind kind;
-        final int sides;
-        final int starPoints;
+        final ShapeKind kind; final int sides; final int starPoints;
         ResolvedShape(ShapeKind k, int s, int sp) { this.kind = k; this.sides = s; this.starPoints = sp; }
     }
 
     private ResolvedShape resolveShape(Node node, PreviewProperties props) {
         Boolean enabled = props.getValue(PROP_ENABLE);
-        boolean enabledValue = enabled != null ? enabled : true;
-        if (!enabledValue) return null;
+        if (enabled != null && !enabled) return null;
 
-        String shapeCol = props.getValue(PROP_SHAPE_COLUMN);
-        if (shapeCol == null) shapeCol = "Shape";
-        String polyCol = props.getValue(PROP_POLYGON_COLUMN);
-        if (polyCol == null) polyCol = "Polygon";
-        String defaultShape = props.getValue(PROP_DEFAULT_SHAPE);
-        if (defaultShape == null) defaultShape = "Circle";
+        String shapeCol = valOr(props.getValue(PROP_SHAPE_COLUMN), "shape");
+        String polyCol  = valOr(props.getValue(PROP_POLY_COLUMN),  "polygon");
+        String defShape = valOr(props.getValue(PROP_DEFAULT_SHAPE), "circle");
         Integer starPts = props.getValue(PROP_STAR_POINTS);
         int starPtsValue = starPts != null ? starPts : 5;
 
-        // 默认
-        ShapeKind kind = parseShapeName(defaultShape);
+        ShapeKind kind = parseShapeName(defShape);
         int sides = 0;
 
         if (node != null) {
-            // 先按 Shape 列解析
-            Object sv = safeGetAttribute(node, shapeCol);
+            Object sv = safeAttr(node, shapeCol);
             if (sv != null) {
                 ShapeKind k = parseShapeName(String.valueOf(sv));
                 if (k != null) kind = k;
             }
-            // 再按 Polygon 列解析边数（仅当目标是 POLYGON 或未指定具体名称时使用）
             if (kind == ShapeKind.POLYGON || kind == null || kind == ShapeKind.CIRCLE) {
-                Object pv = safeGetAttribute(node, polyCol);
-                Integer sidesInt = parseInt(pv);
-                if (sidesInt != null && sidesInt >= 3) {
-                    kind = ShapeKind.POLYGON;
-                    sides = sidesInt;
-                }
+                Integer si = parseInt(safeAttr(node, polyCol));
+                if (si != null && si >= 3) { kind = ShapeKind.POLYGON; sides = si; }
             }
         }
-
-        if (kind == null) kind = ShapeKind.CIRCLE; // 保底回退
+        if (kind == null) kind = ShapeKind.CIRCLE;
         return new ResolvedShape(kind, sides, starPtsValue);
     }
 
-    private Object safeGetAttribute(Node n, String col) {
+    private ShapeKind parseShapeName(String name) {
+        if (name == null || name.isBlank()) return null;
         try {
-            if (col == null || col.isBlank()) return null;
-            return n.getAttribute(col);
-        } catch (Exception ignore) {
+            return ShapeKind.valueOf(name.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException e) {
             return null;
         }
     }
 
+    private Object safeAttr(Node n, String col) {
+        try { if (col == null || col.isBlank()) return null; return n.getAttribute(col); }
+        catch (Exception ignore) { return null; }
+    }
     private Integer parseInt(Object v) {
         if (v == null) return null;
         if (v instanceof Number) return ((Number) v).intValue();
         try { return Integer.parseInt(String.valueOf(v).trim()); } catch (Exception e) { return null; }
     }
+    private String valOr(String v, String def) { return (v == null || v.isBlank()) ? def : v; }
 
-    private ShapeKind parseShapeName(String name) {
-        if (name == null) return null;
-        String s = name.trim().toUpperCase(Locale.ROOT);
-        switch (s) {
-            case "CIRCLE":
-                return ShapeKind.CIRCLE;
-            case "TRIANGLE":
-                return ShapeKind.TRIANGLE;
-            case "SQUARE":
-                return ShapeKind.SQUARE;
-            case "DIAMOND":
-                return ShapeKind.DIAMOND;
-            case "PENTAGON":
-                return ShapeKind.PENTAGON;
-            case "HEXAGON":
-                return ShapeKind.HEXAGON;
-            case "HEPTAGON":
-                return ShapeKind.HEPTAGON;
-            case "OCTAGON":
-                return ShapeKind.OCTAGON;
-            case "STAR":
-                return ShapeKind.STAR;
-            case "POLYGON":
-                return ShapeKind.POLYGON;
-            default:
-                return null;
+    private String toSvgPath(Path2D path) {
+        StringBuilder sb = new StringBuilder();
+        PathIterator it = path.getPathIterator(null, 0.25);
+        double[] c = new double[6];
+        while (!it.isDone()) {
+            switch (it.currentSegment(c)) {
+                case PathIterator.SEG_MOVETO: sb.append('M').append(c[0]).append(' ').append(c[1]); break;
+                case PathIterator.SEG_LINETO: sb.append(' ').append('L').append(' ').append(c[0]).append(' ').append(c[1]); break;
+                case PathIterator.SEG_CLOSE:  sb.append(' ').append('Z'); break;
+                default: break;
+            }
+            it.next();
         }
+        return sb.toString();
     }
+    private String rgb(Color c) { return String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue()); }
 }
