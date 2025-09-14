@@ -37,8 +37,6 @@ made subject to such option by the copyright holder.
 
 Contributor(s):
 zde <zde6919@rit.edu>
-
-Portions Copyrighted 2011 Gephi Consortium.
  */
 package org.zeager.polygonnodes;
 
@@ -56,17 +54,15 @@ import org.openide.util.NbBundle;
 import org.openide.util.lookup.ServiceProvider;
 import processing.core.*;
 
-/**
- * Extends and replaces default node renderer and implements polygon shaped nodes.
- * <p>
- * Allows for nodes to be rendered as a regular polygon with an arbitrary number of sides by 
- * adding a column of Integers in the data table named "Polygon." The value corresponds to the number of sides.
- * NOTE: the renderer must be enabled in the "Manage Renderers" tab.
- * @author zde <zde6919@rit.edu>
- */
+// 新增：PDF/SVG 所需导入
+import com.itextpdf.text.pdf.PdfContentByte;
+import com.itextpdf.text.pdf.PdfGState;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+
 @ServiceProvider(service = Renderer.class)
 public class PolygonNodes extends NodeRenderer {
-    
+
     @Override
     public String getDisplayName() {
         return NbBundle.getMessage(PolygonNodes.class, "PolygonNodes.name");
@@ -74,32 +70,64 @@ public class PolygonNodes extends NodeRenderer {
 
     @Override
     public void render(Item item, RenderTarget target, PreviewProperties properties) {
+        // 统一判断当前节点是否需要渲染为 n-gon
+        int numSides = resolveNumSides(item, properties);
+
         if (target instanceof ProcessingTarget) {
-            GraphModel graphModel = Lookup.getDefault().lookup(GraphController.class).getModel();
-            int renderAsNgon = -1;
-            for (Node n : graphModel.getGraph().getNodes()) {
-                try {
-                    if (n.getNodeData().getId().equals(item.getSource().toString())
-                        && (Integer) n.getNodeData().getAttributes().getValue("Polygon") >= 3
-                        && properties.getBooleanValue("PolygonNodes.property.enable")) {
-                        renderAsNgon = (Integer) n.getNodeData().getAttributes().getValue("Polygon");
-                        break;
-                    }
-                }
-                catch (Exception e) {}
-            }
-            if (renderAsNgon != -1) {
-                renderProcessing(item, (ProcessingTarget) target, properties, renderAsNgon);
+            if (numSides != -1) {
+                renderProcessing(item, (ProcessingTarget) target, properties, numSides);
             } else {
                 super.render(item, target, properties);
             }
         } else if (target instanceof SVGTarget) {
-            renderSVG(item, (SVGTarget) target, properties);
+            if (numSides != -1) {
+                renderSVG(item, (SVGTarget) target, properties, numSides);
+            } else {
+                super.render(item, target, properties);
+            }
         } else if (target instanceof PDFTarget) {
-            renderPDF(item, (PDFTarget) target, properties);
+            if (numSides != -1) {
+                renderPDF(item, (PDFTarget) target, properties, numSides);
+            } else {
+                super.render(item, target, properties);
+            }
         } else {
             super.render(item, target, properties);
         }
+    }
+
+    /**
+     * 统一解析当前 item 是否应渲染为多边形，以及多边形边数。
+     * 返回 -1 表示不渲染为多边形。
+     */
+    private int resolveNumSides(Item item, PreviewProperties properties) {
+        try {
+            if (!properties.getBooleanValue("PolygonNodes.property.enable")) {
+                return -1;
+            }
+        } catch (Exception e) {
+            return -1;
+        }
+
+        GraphModel graphModel = Lookup.getDefault().lookup(GraphController.class).getModel();
+        String itemId = item.getSource().toString();
+
+        for (Node n : graphModel.getGraph().getNodes()) {
+            try {
+                if (n.getNodeData().getId().equals(itemId)) {
+                    Object val = n.getNodeData().getAttributes().getValue("Polygon");
+                    if (val instanceof Integer) {
+                        int sides = (Integer) val;
+                        if (sides >= 3) {
+                            return sides;
+                        }
+                    }
+                    break;
+                }
+            } catch (Exception ignore) {
+            }
+        }
+        return -1;
     }
 
     public void renderProcessing(Item item, ProcessingTarget target, PreviewProperties properties, int numSides) {
@@ -125,32 +153,131 @@ public class PolygonNodes extends NodeRenderer {
             graphics.noStroke();
         }
         graphics.fill(color.getRed(), color.getGreen(), color.getBlue(), alpha);
-        
+
         // Draw n-gon
         graphics.beginShape();
-        for (int i = 0; i < numSides; i++){
+        for (int i = 0; i < numSides; i++) {
             double angle = 2 * Math.PI / numSides;
             float calcX, calcY;
             if (numSides % 2 == 0) {
-                calcX = (float)(x + (size * .6) * Math.cos(i * angle - Math.PI/4));
-                calcY = (float)(y - (size * .6) * Math.sin(i * angle - Math.PI/4));
+                calcX = (float) (x + (size * .6) * Math.cos(i * angle - Math.PI / 4));
+                calcY = (float) (y - (size * .6) * Math.sin(i * angle - Math.PI / 4));
             } else {
-                calcX = (float)(x + (size * .6) * Math.cos(i * angle));
-                calcY = (float)(y - (size * .6) * Math.sin(i * angle));
+                calcX = (float) (x + (size * .6) * Math.cos(i * angle));
+                calcY = (float) (y - (size * .6) * Math.sin(i * angle));
             }
             graphics.vertex(calcX, calcY);
         }
         graphics.endShape(PGraphics.CLOSE);
     }
 
-    @Override
-    public void renderPDF(Item item, PDFTarget target, PreviewProperties properties) {
-        //Not implemented
+    // ------------ 新增：PDF 导出 ------------
+    public void renderPDF(Item item, PDFTarget target, PreviewProperties properties, int numSides) {
+        // 基本参数与颜色、透明度
+        Float x = item.getData(NodeItem.X);
+        Float y = item.getData(NodeItem.Y);
+        Float size = item.getData(NodeItem.SIZE);
+        Color color = item.getData(NodeItem.COLOR);
+        Color borderColor = ((DependantColor) properties.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(color);
+        float borderSize = properties.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
+        float alphaF = properties.getFloatValue(PreviewProperty.NODE_OPACITY) / 100f;
+        if (alphaF > 1f) alphaF = 1f;
+
+        PdfContentByte cb = target.getContentByte(); // PDF 画布（iText） [3](https://gephi.org/gephi/0.9.0/apidocs/org/gephi/preview/api/PDFTarget.html)
+        cb.saveState();
+        try {
+            // 透明度
+            PdfGState gs = new PdfGState();
+            gs.setFillOpacity(alphaF);
+            gs.setStrokeOpacity(alphaF);
+            cb.setGState(gs);
+
+            // 颜色与线宽
+            cb.setRGBColorFill(color.getRed(), color.getGreen(), color.getBlue());
+            if (borderSize > 0f) {
+                cb.setRGBColorStroke(borderColor.getRed(), borderColor.getGreen(), borderColor.getBlue());
+                cb.setLineWidth(borderSize);
+            }
+
+            // 路径
+            double angle = 2 * Math.PI / numSides;
+            for (int i = 0; i < numSides; i++) {
+                float calcX, calcY;
+                if (numSides % 2 == 0) {
+                    calcX = (float) (x + (size * .6) * Math.cos(i * angle - Math.PI / 4));
+                    calcY = (float) (y - (size * .6) * Math.sin(i * angle - Math.PI / 4));
+                } else {
+                    calcX = (float) (x + (size * .6) * Math.cos(i * angle));
+                    calcY = (float) (y - (size * .6) * Math.sin(i * angle));
+                }
+                if (i == 0) {
+                    cb.moveTo(calcX, calcY);
+                } else {
+                    cb.lineTo(calcX, calcY);
+                }
+            }
+            cb.closePath();
+
+            if (borderSize > 0f) {
+                cb.fillStroke();
+            } else {
+                cb.fill();
+            }
+        } finally {
+            cb.restoreState();
+        }
+        // iText 的这些 API 可用于在 Gephi PDF target 上绘制路径与设置 alpha。[4](https://gephi.org/javadoc/0.9.3/org/gephi/preview/api/PDFTarget.html)[5](https://www.javatips.net/api/com.itextpdf.text.pdf.pdfcontentbyte)
     }
 
-    @Override
-    public void renderSVG(Item item, SVGTarget target, PreviewProperties properties) {
-        //Not implemented
+    // ------------ 新增：SVG 导出 ------------
+    public void renderSVG(Item item, SVGTarget target, PreviewProperties properties, int numSides) {
+        Float x = item.getData(NodeItem.X);
+        Float y = item.getData(NodeItem.Y);
+        Float size = item.getData(NodeItem.SIZE);
+        Color color = item.getData(NodeItem.COLOR);
+        Color borderColor = ((DependantColor) properties.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(color);
+        float borderSize = properties.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
+        float alphaF = properties.getFloatValue(PreviewProperty.NODE_OPACITY) / 100f;
+        if (alphaF > 1f) alphaF = 1f;
+
+        Document doc = target.getDocument(); // Batik 的 DOM 文档 [1](https://gephi.org/gephi/0.9.2/apidocs/org/gephi/preview/api/RenderTarget.html)
+        String svgNS = doc.getDocumentElement().getNamespaceURI();
+        Element polygon = doc.createElementNS(svgNS, "polygon");
+
+        // points 属性
+        StringBuilder pts = new StringBuilder();
+        double angle = 2 * Math.PI / numSides;
+        for (int i = 0; i < numSides; i++) {
+            float calcX, calcY;
+            if (numSides % 2 == 0) {
+                calcX = (float) (x + (size * .6) * Math.cos(i * angle - Math.PI / 4));
+                calcY = (float) (y - (size * .6) * Math.sin(i * angle - Math.PI / 4));
+            } else {
+                calcX = (float) (x + (size * .6) * Math.cos(i * angle));
+                calcY = (float) (y - (size * .6) * Math.sin(i * angle));
+            }
+            if (i > 0) pts.append(' ');
+            pts.append(calcX).append(',').append(calcY);
+        }
+        polygon.setAttribute("points", pts.toString());
+
+        // 颜色、透明度、描边
+        polygon.setAttribute("fill", rgb(color));
+        polygon.setAttribute("fill-opacity", String.valueOf(alphaF));
+        if (borderSize > 0f) {
+            polygon.setAttribute("stroke", rgb(borderColor));
+            polygon.setAttribute("stroke-width", String.valueOf(borderSize));
+            polygon.setAttribute("stroke-opacity", String.valueOf(alphaF));
+        } else {
+            polygon.setAttribute("stroke", "none");
+        }
+
+        // 追加到根 <svg>（也可根据需要追加到某个 <g> 层）
+        doc.getDocumentElement().appendChild(polygon);
+    }
+
+    private static String rgb(Color c) {
+        return "rgb(" + c.getRed() + "," + c.getGreen() + "," + c.getBlue() + ")";
     }
 
     @Override
@@ -168,14 +295,15 @@ public class PolygonNodes extends NodeRenderer {
                 PreviewProperty.CATEGORY_NODES).setValue(true);
         return newProps;
     }
-    
+
     @Override
     public boolean isRendererForitem(Item item, PreviewProperties properties) {
         return item.getType().equals(Item.NODE);
     }
-    
+
     @Override
     public void preProcess(PreviewModel previewModel) {
         //Not implemented
     }
 }
+
