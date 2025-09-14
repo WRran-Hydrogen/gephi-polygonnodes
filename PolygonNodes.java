@@ -40,20 +40,17 @@ zde <zde6919@rit.edu>
 yao <xy3717@foxmail.com>
  */
 
-package org.zeager.polygonnodes;
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Polygon-shaped & multiple-shape node renderer for Gephi 0.10.x (JDK 17)
 
 import java.awt.BasicStroke;
 import java.awt.Color;
-import java.awt.Composite;
 import java.awt.Graphics2D;
-import java.awt.AlphaComposite;
+import java.awt.Stroke;
 import java.awt.geom.Path2D;
+import java.util.Locale;
 
-import org.gephi.graph.api.Column;
-import org.gephi.graph.api.GraphController;
-import org.gephi.graph.api.GraphModel;
 import org.gephi.graph.api.Node;
-
 import org.gephi.preview.api.G2DTarget;
 import org.gephi.preview.api.Item;
 import org.gephi.preview.api.PDFTarget;
@@ -61,303 +58,301 @@ import org.gephi.preview.api.PreviewModel;
 import org.gephi.preview.api.PreviewProperties;
 import org.gephi.preview.api.PreviewProperty;
 import org.gephi.preview.api.RenderTarget;
+import org.gephi.preview.spi.Renderer;
 import org.gephi.preview.api.SVGTarget;
-
 import org.gephi.preview.plugin.items.NodeItem;
 import org.gephi.preview.plugin.renderers.NodeRenderer;
-import org.gephi.preview.spi.Renderer;
 import org.gephi.preview.types.DependantColor;
-
-import org.openide.util.Lookup;
 import org.openide.util.NbBundle;
 import org.openide.util.lookup.ServiceProvider;
 
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-
-// PDFBox (Gephi 0.10.x 使用 PDFBox 而非 iText)
-import org.apache.pdfbox.pdmodel.PDPageContentStream;
-import org.apache.pdfbox.pdmodel.graphics.state.PDExtGState;
-
-/**
- * 让节点以正多边形渲染：在 Data Laboratory 添加整型列 "Polygon"，值为边数 (>=3)
- * 在 Preview 的 "Manage Renderers" 中启用本渲染器即可。
- *
- * 适配 Gephi 0.10.1：
- * - 屏显：G2DTarget + Graphics2D
- * - SVG：Batik Document 追加 <polygon>
- * - PDF：PDFBox PDPageContentStream（含透明/描边）
- */
 @ServiceProvider(service = Renderer.class)
 public class PolygonNodes extends NodeRenderer {
 
+    // ======== Property keys (appear in Preview -> Settings) ========
+    private static final String PROP_ENABLE = "ShapeNodes.property.enable";
+    private static final String PROP_SHAPE_COLUMN = "ShapeNodes.property.shapeColumn";
+    private static final String PROP_POLYGON_COLUMN = "ShapeNodes.property.polygonColumn";
+    private static final String PROP_DEFAULT_SHAPE = "ShapeNodes.property.defaultShape";
+    private static final String PROP_STAR_POINTS = "ShapeNodes.property.starPoints";
+
+    // ======== Supported shapes ========
+    private enum ShapeKind {
+        CIRCLE, TRIANGLE, SQUARE, DIAMOND, POLYGON, PENTAGON, HEXAGON, HEPTAGON, OCTAGON, STAR
+    }
+
     @Override
     public String getDisplayName() {
-        return NbBundle.getMessage(PolygonNodes.class, "PolygonNodes.name");
+        // 将在 Manage Renderers 中显示的名称
+        return NbBundle.getMessage(PolygonNodes.class, "PolygonNodes.name", "Polygon shaped nodes");
     }
 
-    @Override
-    public void render(Item item, RenderTarget target, PreviewProperties properties) {
-        final int numSides = resolveNumSides(item, properties);
-        if (numSides < 3) {
-            // 不满足多边形条件 -> 回落到默认节点渲染
-            super.render(item, target, properties);
-            return;
-        }
-
-        if (target instanceof G2DTarget) {
-            renderG2D(item, (G2DTarget) target, properties, numSides);
-        } else if (target instanceof SVGTarget) {
-            renderSVG(item, (SVGTarget) target, properties, numSides);
-        } else if (target instanceof PDFTarget) {
-            renderPDF(item, (PDFTarget) target, properties, numSides);
-        } else {
-            // 其它目标 -> 走父类默认
-            super.render(item, target, properties);
-        }
-    }
-
-    // 统一解析当前节点是否渲染为多边形，以及边数
-    private int resolveNumSides(Item item, PreviewProperties properties) {
-        try {
-            Boolean enabled = properties.getBooleanValue("PolygonNodes.property.enable");
-            if (enabled == null || !enabled) return -1;
-        } catch (Exception e) {
-            return -1;
-        }
-
-        // 直接从 item 的 source 取 Graph API 的 Node
-        Object src = item.getSource();
-        if (!(src instanceof Node)) return -1;
-        Node node = (Node) src;
-
-        GraphModel graphModel = Lookup.getDefault().lookup(GraphController.class).getModel();
-        if (graphModel == null) return -1;
-
-        Column polygonCol = graphModel.getNodeTable().getColumn("Polygon");
-        if (polygonCol == null) return -1;
-
-        Object val = node.getAttribute(polygonCol);
-        if (val instanceof Number) {
-            int sides = ((Number) val).intValue();
-            return sides >= 3 ? sides : -1;
-        }
-        return -1;
-    }
-
-    /* -------------------- G2D（预览/PNG 等） -------------------- */
-    private void renderG2D(Item item, G2DTarget target, PreviewProperties properties, int numSides) {
-        // 基本参数
-        Float x = item.getData(NodeItem.X);
-        Float y = item.getData(NodeItem.Y);
-        Float size = item.getData(NodeItem.SIZE);
-        Color color = item.getData(NodeItem.COLOR);
-        Color borderColor = ((DependantColor) properties.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(color);
-        float borderSize = properties.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
-        float alphaF = clamp01(properties.getFloatValue(PreviewProperty.NODE_OPACITY) / 100f);
-
-        Graphics2D g2 = getGraphics2D(target);
-
-        // 多边形路径
-        Path2D.Float path = buildPolygonPath(x, y, size, numSides);
-
-        // 透明度
-        Composite oldCmp = g2.getComposite();
-        g2.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alphaF));
-
-        // 填充
-        g2.setColor(color);
-        g2.fill(path);
-
-        // 描边
-        if (borderSize > 0f) {
-            g2.setStroke(new BasicStroke(borderSize));
-            g2.setColor(borderColor);
-            g2.draw(path);
-        }
-
-        // 还原透明度
-        g2.setComposite(oldCmp);
-    }
-
-    // 兼容可能存在的 getGraphics / getGraphics2D 命名差异（反射优先取 getGraphics）
-    private Graphics2D getGraphics2D(G2DTarget target) {
-        try {
-            try {
-                return (Graphics2D) target.getClass().getMethod("getGraphics").invoke(target);
-            } catch (NoSuchMethodException e) {
-                return (Graphics2D) target.getClass().getMethod("getGraphics2D").invoke(target);
-            }
-        } catch (Exception e) {
-            throw new IllegalStateException("Cannot acquire Graphics2D from G2DTarget", e);
-        }
-    }
-
-    /* -------------------- SVG 导出 -------------------- */
-    private void renderSVG(Item item, SVGTarget target, PreviewProperties properties, int numSides) {
-        Float x = item.getData(NodeItem.X);
-        Float y = item.getData(NodeItem.Y);
-        Float size = item.getData(NodeItem.SIZE);
-        Color color = item.getData(NodeItem.COLOR);
-        Color borderColor = ((DependantColor) properties.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(color);
-        float borderSize = properties.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
-        float alphaF = clamp01(properties.getFloatValue(PreviewProperty.NODE_OPACITY) / 100f);
-
-        Document doc = target.getDocument(); // Batik Document
-        String svgNS = doc.getDocumentElement().getNamespaceURI();
-        Element polygon = doc.createElementNS(svgNS, "polygon");
-
-        // points
-        String points = buildPolygonPointsAttribute(x, y, size, numSides);
-        polygon.setAttribute("points", points);
-
-        // 填充 & 透明
-        polygon.setAttribute("fill", rgb(color));
-        polygon.setAttribute("fill-opacity", String.valueOf(alphaF));
-
-        // 描边
-        if (borderSize > 0f) {
-            polygon.setAttribute("stroke", rgb(borderColor));
-            polygon.setAttribute("stroke-width", String.valueOf(borderSize));
-            polygon.setAttribute("stroke-opacity", String.valueOf(alphaF));
-        } else {
-            polygon.setAttribute("stroke", "none");
-        }
-
-        // 追加到 <svg> 根元素（如需控制层次，可追加到指定 <g>）
-        doc.getDocumentElement().appendChild(polygon);
-    }
-
-    /* -------------------- PDF 导出（PDFBox） -------------------- */
-    private void renderPDF(Item item, PDFTarget target, PreviewProperties properties, int numSides) {
-        Float x = item.getData(NodeItem.X);
-        Float y = item.getData(NodeItem.Y);
-        Float size = item.getData(NodeItem.SIZE);
-        Color color = item.getData(NodeItem.COLOR);
-        Color borderColor = ((DependantColor) properties.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(color);
-        float borderSize = properties.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
-        float alphaF = clamp01(properties.getFloatValue(PreviewProperty.NODE_OPACITY) / 100f);
-
-        // 取得 PDFBox 的 PDPageContentStream（0.10.x 的 PDFTarget 提供 PDFBox 对象）
-        // 具体方法名在 0.10.x 为 getContentStream（若你本地 API 名称不同，下面反射会尝试常见别名）
-        PDPageContentStream cs = getPDPageContentStream(target);
-
-        try {
-            // 透明度
-            PDExtGState gs = new PDExtGState();
-            gs.setNonStrokingAlphaConstant(alphaF);
-            gs.setStrokingAlphaConstant(alphaF);
-            cs.setGraphicsStateParameters(gs);
-
-            // 颜色与线宽
-            cs.setNonStrokingColor(color.getRed(), color.getGreen(), color.getBlue());
-            if (borderSize > 0f) {
-                cs.setStrokingColor(borderColor.getRed(), borderColor.getGreen(), borderColor.getBlue());
-                cs.setLineWidth(borderSize);
-            }
-
-            // 路径：与预览一致（偶数边旋转 45°）
-            final double angle = 2 * Math.PI / numSides;
-            for (int i = 0; i < numSides; i++) {
-                float[] pt = computeVertex(x, y, size, numSides, angle, i);
-                if (i == 0) cs.moveTo(pt[0], pt[1]);
-                else cs.lineTo(pt[0], pt[1]);
-            }
-            cs.closePath();
-
-            if (borderSize > 0f) cs.fillAndStroke();
-            else cs.fill();
-
-        } catch (Exception e) {
-            throw new IllegalStateException("Error while rendering polygon to PDF", e);
-        }
-    }
-
-    // 通过反射获取 PDPageContentStream，以兼容可能的命名差异（getContentStream / getPageContentStream）
-    private PDPageContentStream getPDPageContentStream(PDFTarget target) {
-        try {
-            try {
-                return (PDPageContentStream) target.getClass().getMethod("getContentStream").invoke(target);
-            } catch (NoSuchMethodException e1) {
-                return (PDPageContentStream) target.getClass().getMethod("getPageContentStream").invoke(target);
-            }
-        } catch (Exception e) {
-            throw new IllegalStateException("Cannot acquire PDPageContentStream from PDFTarget (0.10.x)", e);
-        }
-    }
-
-    /* -------------------- 工具方法 -------------------- */
-
-    private static Path2D.Float buildPolygonPath(float x, float y, float size, int numSides) {
-        Path2D.Float path = new Path2D.Float(Path2D.WIND_NON_ZERO);
-        final double angle = 2 * Math.PI / numSides;
-
-        for (int i = 0; i < numSides; i++) {
-            float[] pt = computeVertex(x, y, size, numSides, angle, i);
-            if (i == 0) path.moveTo(pt[0], pt[1]);
-            else path.lineTo(pt[0], pt[1]);
-        }
-        path.closePath();
-        return path;
-    }
-
-    private static String buildPolygonPointsAttribute(float x, float y, float size, int numSides) {
-        StringBuilder sb = new StringBuilder();
-        final double angle = 2 * Math.PI / numSides;
-        for (int i = 0; i < numSides; i++) {
-            float[] pt = computeVertex(x, y, size, numSides, angle, i);
-            if (i > 0) sb.append(' ');
-            sb.append(pt[0]).append(',').append(pt[1]);
-        }
-        return sb.toString();
-    }
-
-    // 与原 Processing 版本一致：偶数边整体旋转 45°
-    private static float[] computeVertex(float x, float y, float size, int numSides, double angle, int i) {
-        final double rot = (numSides % 2 == 0) ? (Math.PI / 4) : 0.0;
-        float vx = (float) (x + (size * .6) * Math.cos(i * angle - rot));
-        float vy = (float) (y - (size * .6) * Math.sin(i * angle - rot));
-        return new float[]{vx, vy};
-    }
-
-    private static float clamp01(float v) {
-        if (v < 0f) return 0f;
-        if (v > 1f) return 1f;
-        return v;
-    }
-
-    private static String rgb(Color c) {
-        return "rgb(" + c.getRed() + "," + c.getGreen() + "," + c.getBlue() + ")";
-    }
-
-    /* -------------------- 其余接口实现 -------------------- */
-
-    @Override
-    public PreviewProperty[] getProperties() {
-        // 保持与默认节点渲染器相同的属性 + 启用多边形的开关
-        PreviewProperty[] props = super.getProperties();
-        PreviewProperty[] newProps = new PreviewProperty[props.length + 1];
-        System.arraycopy(props, 0, newProps, 0, props.length);
-
-        newProps[newProps.length - 1] = PreviewProperty.createProperty(
-                this,
-                "PolygonNodes.property.enable",
-                Boolean.class,
-                NbBundle.getMessage(PolygonNodes.class, "PolygonNodes.property.name"),
-                NbBundle.getMessage(PolygonNodes.class, "PolygonNodes.property.description"),
-                PreviewProperty.CATEGORY_NODES
-        ).setValue(true);
-        return newProps;
-    }
-
-    // 注意：接口方法名在 API 中就是 isRendererForitem（小写 i），保持一致
     @Override
     public boolean isRendererForitem(Item item, PreviewProperties properties) {
-        return item.getType().equals(Item.NODE);
+        // 只处理节点项目，并受启用开关控制
+        Boolean enabled = properties.getValue(PROP_ENABLE);
+        boolean enabledValue = enabled != null ? enabled : true;
+        return enabledValue && Item.NODE.equals(item.getType());
     }
 
     @Override
     public void preProcess(PreviewModel previewModel) {
-        // Not implemented
+        // 这里不需要额外预处理；如需复杂逻辑，可在此填充 item 的缓存数据
+        super.preProcess(previewModel);
+    }
+
+    @Override
+    public void render(Item item, RenderTarget target, PreviewProperties props) {
+        // 读取当前节点的形状配置
+        Node node = (item.getSource() instanceof Node) ? (Node) item.getSource() : null;
+        ResolvedShape rs = resolveShape(node, props);
+
+        // 未能解析出自定义形状 -> 走默认节点渲染（圆）
+        if (rs == null || rs.kind == ShapeKind.CIRCLE) {
+            super.render(item, target, props);
+            return;
+        }
+
+        if (target instanceof G2DTarget) {
+            renderG2D(item, (G2DTarget) target, props, rs);
+        } else if (target instanceof SVGTarget) {
+            // 简单回退：对 SVG/PDF 仍然交给父类，保持兼容
+            super.render(item, target, props);
+        } else if (target instanceof PDFTarget) {
+            super.render(item, target, props);
+        } else {
+            // 未知目标，安全回退
+            super.render(item, target, props);
+        }
+    }
+
+    @Override
+    public PreviewProperty[] getProperties() {
+        // 在 Preview -> Settings 面板暴露可调属性
+        return new PreviewProperty[] {
+            PreviewProperty.createProperty(
+                this, PROP_ENABLE, Boolean.class,
+                "Enable multiple shapes", PreviewProperty.CATEGORY_NODES,
+                "Enable node shape mapping by attribute"
+            ).setValue(Boolean.TRUE),
+            PreviewProperty.createProperty(
+                this, PROP_SHAPE_COLUMN, String.class,
+                "Shape column name", PreviewProperty.CATEGORY_NODES,
+                "Node string column holding shape (e.g. shape). Values: circle, triangle, square, diamond, polygon, pentagon, hexagon, heptagon, octagon, star"
+            ).setValue("shape"),
+            PreviewProperty.createProperty(
+                this, PROP_POLYGON_COLUMN, String.class,
+                "Polygon-sides column name", PreviewProperty.CATEGORY_NODES,
+                "Node integer column holding the polygon number of sides (>=3). Used when shape is polygon/unspecified."
+            ).setValue("polygon"),
+            PreviewProperty.createProperty(
+                this, PROP_DEFAULT_SHAPE, String.class,
+                "Default shape", PreviewProperty.CATEGORY_NODES,
+                "Fallback shape name when no valid attribute is set (circle/triangle/square/diamond/polygon/pentagon/hexagon/heptagon/octagon/star)."
+            ).setValue("circle"),
+            PreviewProperty.createProperty(
+                this, PROP_STAR_POINTS, Integer.class,
+                "Star points", PreviewProperty.CATEGORY_NODES,
+                "Number of points for star shape (>=3)."
+            ).setValue(Integer.valueOf(5))
+        };
+    }
+
+    // ======================== Rendering (G2D) ========================
+
+    private void renderG2D(Item item, G2DTarget target, PreviewProperties props, ResolvedShape rs) {
+        // 基本几何与样式
+        Float x = item.getData(NodeItem.X);
+        Float y = item.getData(NodeItem.Y);
+        Float size = item.getData(NodeItem.SIZE); // 预览里大小单位（与默认节点渲染一致）
+        Color fill = item.getData(NodeItem.COLOR);
+
+        Color border = ((DependantColor) props.getValue(PreviewProperty.NODE_BORDER_COLOR)).getColor(fill);
+        float borderWidth = props.getFloatValue(PreviewProperty.NODE_BORDER_WIDTH);
+
+        Graphics2D g2 = target.getGraphics();
+        Path2D.Float path;
+        switch (rs.kind) {
+            case TRIANGLE:
+                path = regularPolygonPath(x, y, size, 3, -Math.PI / 2);
+                break;
+            case SQUARE:
+                path = regularPolygonPath(x, y, size, 4, Math.PI / 4); // 旋转成菱形方向的正方形用于对齐视觉
+                break;
+            case DIAMOND:
+                path = diamondPath(x, y, size);
+                break;
+            case PENTAGON:
+                path = regularPolygonPath(x, y, size, 5, -Math.PI / 2);
+                break;
+            case HEXAGON:
+                path = regularPolygonPath(x, y, size, 6, -Math.PI / 2);
+                break;
+            case HEPTAGON:
+                path = regularPolygonPath(x, y, size, 7, -Math.PI / 2);
+                break;
+            case OCTAGON:
+                path = regularPolygonPath(x, y, size, 8, -Math.PI / 2);
+                break;
+            case POLYGON:
+                path = regularPolygonPath(x, y, size, Math.max(3, rs.sides), -Math.PI / 2);
+                break;
+            case STAR:
+                path = starPath(x, y, size, Math.max(3, rs.starPoints));
+                break;
+            case CIRCLE:
+            default:
+                path = null; // 已在上层回退
+                break;
+        }
+
+        if (path == null) {
+            super.render(item, target, props);
+            return;
+        }
+
+        // 先填充，再描边（与默认节点样式保持一致的边界表现）
+        g2.setColor(fill);
+        g2.fill(path);
+
+        if (borderWidth > 0f) {
+            Stroke old = g2.getStroke();
+            g2.setStroke(new BasicStroke(borderWidth, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER));
+            g2.setColor(border);
+            g2.draw(path);
+            g2.setStroke(old);
+        }
+    }
+
+    private Path2D.Float regularPolygonPath(float cx, float cy, float radius, int n, double phase) {
+        Path2D.Float poly = new Path2D.Float();
+        for (int i = 0; i < n; i++) {
+            double a = 2 * Math.PI * i / n + phase;
+            double px = cx + radius * Math.cos(a);
+            double py = cy + radius * Math.sin(a);
+            if (i == 0) poly.moveTo(px, py); else poly.lineTo(px, py);
+        }
+        poly.closePath();
+        return poly;
+    }
+
+    private Path2D.Float diamondPath(float cx, float cy, float r) {
+        Path2D.Float p = new Path2D.Float();
+        p.moveTo(cx, cy - r);
+        p.lineTo(cx + r, cy);
+        p.lineTo(cx, cy + r);
+        p.lineTo(cx - r, cy);
+        p.closePath();
+        return p;
+    }
+
+    private Path2D.Float starPath(float cx, float cy, float r, int points) {
+        // “星形”= 外半径 r，内半径 r/2（可根据需要改为属性）
+        double rOuter = r;
+        double rInner = r * 0.5;
+        int n = Math.max(3, points);
+        Path2D.Float p = new Path2D.Float();
+        for (int i = 0; i < n * 2; i++) {
+            double a = Math.PI * i / n - Math.PI / 2;
+            double rr = (i % 2 == 0) ? rOuter : rInner;
+            double px = cx + rr * Math.cos(a);
+            double py = cy + rr * Math.sin(a);
+            if (i == 0) p.moveTo(px, py); else p.lineTo(px, py);
+        }
+        p.closePath();
+        return p;
+    }
+
+    // ======================== Shape resolution ========================
+
+    private static final class ResolvedShape {
+        final ShapeKind kind;
+        final int sides;
+        final int starPoints;
+        ResolvedShape(ShapeKind k, int s, int sp) { this.kind = k; this.sides = s; this.starPoints = sp; }
+    }
+
+    private ResolvedShape resolveShape(Node node, PreviewProperties props) {
+        Boolean enabled = props.getValue(PROP_ENABLE);
+        boolean enabledValue = enabled != null ? enabled : true;
+        if (!enabledValue) return null;
+
+        String shapeCol = props.getValue(PROP_SHAPE_COLUMN);
+        if (shapeCol == null) shapeCol = "Shape";
+        String polyCol = props.getValue(PROP_POLYGON_COLUMN);
+        if (polyCol == null) polyCol = "Polygon";
+        String defaultShape = props.getValue(PROP_DEFAULT_SHAPE);
+        if (defaultShape == null) defaultShape = "Circle";
+        Integer starPts = props.getValue(PROP_STAR_POINTS);
+        int starPtsValue = starPts != null ? starPts : 5;
+
+        // 默认
+        ShapeKind kind = parseShapeName(defaultShape);
+        int sides = 0;
+
+        if (node != null) {
+            // 先按 Shape 列解析
+            Object sv = safeGetAttribute(node, shapeCol);
+            if (sv != null) {
+                ShapeKind k = parseShapeName(String.valueOf(sv));
+                if (k != null) kind = k;
+            }
+            // 再按 Polygon 列解析边数（仅当目标是 POLYGON 或未指定具体名称时使用）
+            if (kind == ShapeKind.POLYGON || kind == null || kind == ShapeKind.CIRCLE) {
+                Object pv = safeGetAttribute(node, polyCol);
+                Integer sidesInt = parseInt(pv);
+                if (sidesInt != null && sidesInt >= 3) {
+                    kind = ShapeKind.POLYGON;
+                    sides = sidesInt;
+                }
+            }
+        }
+
+        if (kind == null) kind = ShapeKind.CIRCLE; // 保底回退
+        return new ResolvedShape(kind, sides, starPtsValue);
+    }
+
+    private Object safeGetAttribute(Node n, String col) {
+        try {
+            if (col == null || col.isBlank()) return null;
+            return n.getAttribute(col);
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    private Integer parseInt(Object v) {
+        if (v == null) return null;
+        if (v instanceof Number) return ((Number) v).intValue();
+        try { return Integer.parseInt(String.valueOf(v).trim()); } catch (Exception e) { return null; }
+    }
+
+    private ShapeKind parseShapeName(String name) {
+        if (name == null) return null;
+        String s = name.trim().toUpperCase(Locale.ROOT);
+        switch (s) {
+            case "CIRCLE":
+                return ShapeKind.CIRCLE;
+            case "TRIANGLE":
+                return ShapeKind.TRIANGLE;
+            case "SQUARE":
+                return ShapeKind.SQUARE;
+            case "DIAMOND":
+                return ShapeKind.DIAMOND;
+            case "PENTAGON":
+                return ShapeKind.PENTAGON;
+            case "HEXAGON":
+                return ShapeKind.HEXAGON;
+            case "HEPTAGON":
+                return ShapeKind.HEPTAGON;
+            case "OCTAGON":
+                return ShapeKind.OCTAGON;
+            case "STAR":
+                return ShapeKind.STAR;
+            case "POLYGON":
+                return ShapeKind.POLYGON;
+            default:
+                return null;
+        }
     }
 }
